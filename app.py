@@ -4,29 +4,46 @@ import os
 from datetime import datetime, timedelta
 import calendar
 from dateutil.relativedelta import relativedelta
+import logging
+from pathlib import Path
 
-# Importar datetime para usar en el template
-import datetime as dt_module
+# Load environment variables from .env if present
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except Exception:
+    pass
 
+# App and config
 app = Flask(__name__)
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'dev-secret')
 
-# Configuración de la base de datos SQLite
-DB_PATH = '/workspace/calendar.db'
+# Configuración de la base de datos SQLite (ruta configurable por entorno)
+DEFAULT_DB = Path(__file__).parent / 'calendar.db'
+DB_PATH = Path(os.getenv('DB_PATH', DEFAULT_DB)).resolve()
+
+# Logging
+logging.basicConfig(level=os.getenv('LOG_LEVEL', 'INFO'))
+logger = logging.getLogger(__name__)
 
 def get_db_connection():
     """Obtiene una conexión a la base de datos"""
     try:
-        conn = sqlite3.connect(DB_PATH)
+        conn = sqlite3.connect(str(DB_PATH))
         conn.row_factory = sqlite3.Row  # Para poder acceder a las columnas por nombre
         return conn
     except Exception as e:
-        print(f"Error connecting to database: {e}")
+        logger.exception("Error connecting to database")
         return None
 
 def init_database():
     """Inicializa la base de datos y crea la tabla de días festivos si no existe"""
     conn = get_db_connection()
-    if conn:
+    if not conn:
+        logger.error("No DB connection available for initialization")
+        return
+
+    with conn:
         cursor = conn.cursor()
         # Crear tabla de días festivos si no existe
         cursor.execute('''
@@ -37,7 +54,7 @@ def init_database():
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP
             )
         ''')
-        
+
         # Insertar algunos días festivos de ejemplo si la tabla está vacía
         cursor.execute("SELECT COUNT(*) FROM holidays")
         count = cursor.fetchone()[0]
@@ -50,28 +67,25 @@ def init_database():
             ]
             for holiday_date, description in example_holidays:
                 cursor.execute(
-                    "INSERT INTO holidays (holiday_date, description) VALUES (?, ?)",
+                    "INSERT OR IGNORE INTO holidays (holiday_date, description) VALUES (?, ?)",
                     (holiday_date, description)
                 )
-        
-        conn.commit()
-        cursor.close()
-        conn.close()
+    logger.info('Database initialized at %s', DB_PATH)
 
 def get_holidays(year):
     """Obtiene los días festivos para un año específico"""
     conn = get_db_connection()
-    if conn:
+    if not conn:
+        return []
+
+    with conn:
         cursor = conn.cursor()
         cursor.execute(
             "SELECT holiday_date, description FROM holidays WHERE strftime('%Y', holiday_date) = ? ORDER BY holiday_date",
             (str(year),)
         )
         holidays = cursor.fetchall()
-        cursor.close()
-        conn.close()
-        return [(datetime.strptime(date, '%Y-%m-%d').date(), desc) for date, desc in holidays]
-    return []
+    return [(datetime.strptime(date, '%Y-%m-%d').date(), desc) for date, desc in holidays]
 
 def is_weekend(date):
     """Verifica si una fecha es sábado (5) o domingo (6)"""
@@ -109,23 +123,32 @@ def index():
     # Preparar datos para mostrar en el calendario
     month_name = calendar.month_name[month]
     
-    # Obtener todas las fechas del mes
+    # Obtener todas las fechas del mes y precomputar clases/atributos para el template
     first_day = datetime(year, month, 1).date()
     if month == 12:
         next_month = datetime(year + 1, 1, 1).date()
     else:
         next_month = datetime(year, month + 1, 1).date()
     last_day = next_month - timedelta(days=1)
-    
+
     all_dates = []
     current_date = first_day
     while current_date <= last_day:
+        is_hol = is_holiday(current_date, holidays)
+        is_wend = is_weekend(current_date)
+        css_class = 'working-day'
+        if is_wend:
+            css_class = 'weekend'
+        if is_hol:
+            css_class = 'holiday'
+
+        if current_date == today:
+            css_class = (css_class + ' today').strip()
+
         all_dates.append({
             'date': current_date,
             'day': current_date.day,
-            'is_weekend': is_weekend(current_date),
-            'is_holiday': is_holiday(current_date, holidays),
-            'is_working_day': is_working_day(current_date, holidays),
+            'css_class': css_class,
             'holiday_description': next((desc for d, desc in holidays if d == current_date), '')
         })
         current_date += timedelta(days=1)
@@ -135,8 +158,7 @@ def index():
                           month=month, 
                           month_name=month_name,
                           dates=all_dates,
-                          today=today,
-                          datetime=dt_module)
+                          today=today)
 
 @app.route('/calculate')
 def calculate():
@@ -152,7 +174,7 @@ def calculate():
         holidays = get_holidays(target_date.year)
         if target_date.year != today.year:
             holidays += get_holidays(today.year)
-        
+
         working_days_count = count_working_days(today, target_date, holidays)
         
         return jsonify({
@@ -174,32 +196,25 @@ def add_holiday():
     
     try:
         holiday_date = datetime.strptime(date_str, '%Y-%m-%d').date()
-        
-        conn = get_db_connection()
-        if conn:
+        with get_db_connection() as conn:
+            if conn is None:
+                return jsonify({'error': 'No se pudo conectar a la base de datos'}), 500
             cursor = conn.cursor()
-            # Intentar insertar, si ya existe actualizar
             try:
                 cursor.execute(
                     "INSERT INTO holidays (holiday_date, description) VALUES (?, ?)",
                     (holiday_date, description)
                 )
             except sqlite3.IntegrityError:
-                # Si ya existe, actualizar la descripción
                 cursor.execute(
                     "UPDATE holidays SET description = ? WHERE holiday_date = ?",
                     (description, holiday_date)
                 )
-            conn.commit()
-            cursor.close()
-            conn.close()
-            
             return jsonify({'success': True, 'message': 'Día festivo agregado correctamente'})
-        else:
-            return jsonify({'error': 'No se pudo conectar a la base de datos'}), 500
     except ValueError:
         return jsonify({'error': 'Formato de fecha inválido. Use YYYY-MM-DD'}), 400
 
 if __name__ == '__main__':
     init_database()
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    debug_mode = os.getenv('FLASK_DEBUG', 'False').lower() in ('1', 'true', 'yes')
+    app.run(debug=debug_mode, host='0.0.0.0', port=int(os.getenv('PORT', 5000)))

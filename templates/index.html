@@ -190,45 +190,29 @@
                 </tr>
             </thead>
             <tbody>
-                {% set days_in_month = [] %}
-                {% for i in range(1, 32) %}
-                    {% if year == (datetime(year, month, 1) + timedelta(days=i-1)).year and month == (datetime(year, month, 1) + timedelta(days=i-1)).month %}
-                        {% set _ = days_in_month.append(i) %}
-                    {% endif %}
-                {% endfor %}
-                
-                {% set first_weekday = datetime(year, month, 1).weekday() %}
-                {% set days = days_in_month|length %}
-                
-                {% for week_idx in range((days + first_weekday + 6) // 7) %}
-                <tr>
-                    {% for day_offset in range(7) %}
-                    <td class="
-                        {% if loop.index0 < first_weekday or (week_idx * 7 + day_offset - first_weekday + 1) > days %}
-                            {% if loop.index0 >= first_weekday %}empty{% endif %}
-                        {% else %}
-                            {% set day_num = week_idx * 7 + day_offset - first_weekday + 1 %}
-                            {% set current_date = datetime(year, month, day_num).date() %}
-                            {% if current_date in [d['date'] for d in dates if d['is_weekend']] %}weekend
-                            {% elif current_date in [d['date'] for d in dates if d['is_holiday']] %}holiday
-                            {% elif current_date in [d['date'] for d in dates if d['is_working_day']] %}working-day
+                {% set days = dates|length %}
+                {% if days > 0 %}
+                    {% set first_weekday = dates[0].date.weekday() %}
+                    {% set weeks = (days + first_weekday + 6) // 7 %}
+                    {% for week_idx in range(weeks) %}
+                    <tr>
+                        {% for day_offset in range(7) %}
+                            {% set idx = week_idx * 7 + day_offset - first_weekday %}
+                            {% if idx < 0 or idx >= days %}
+                                <td class="empty"></td>
+                            {% else %}
+                                {% set date_info = dates[idx] %}
+                                <td class="{{ date_info.css_class }}">
+                                    {{ date_info.day }}
+                                    {% if date_info.holiday_description %}
+                                        <div class="holiday-description">{{ date_info.holiday_description }}</div>
+                                    {% endif %}
+                                </td>
                             {% endif %}
-                            {% if current_date == today %} today{% endif %}
-                        {% endif %}
-                    ">
-                        {% if not (loop.index0 < first_weekday or (week_idx * 7 + day_offset - first_weekday + 1) > days) %}
-                            {% set day_num = week_idx * 7 + day_offset - first_weekday + 1 %}
-                            {% set current_date = datetime(year, month, day_num).date() %}
-                            {% set date_info = dates|selectattr('date', 'equalto', current_date)|first %}
-                            {{ day_num }}
-                            {% if date_info.holiday_description %}
-                                <div class="holiday-description">{{ date_info.holiday_description }}</div>
-                            {% endif %}
-                        {% endif %}
-                    </td>
+                        {% endfor %}
+                    </tr>
                     {% endfor %}
-                </tr>
-                {% endfor %}
+                {% endif %}
             </tbody>
         </table>
         
